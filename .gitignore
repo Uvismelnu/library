@@ -1,0 +1,73 @@
+# Android Studio / Gradle build outputs
+build/
+*/build/
+**/build/
+.gradle/
+**/.gradle/
+.cxx/
+
+# IntelliJ / Android Studio IDE config
+.idea/
+**/.idea/
+*.iml
+
+# Kotlin caches
+.kotlin/
+**/.kotlin/
+
+# Local SDK and config (NUNCA subir)
+local.properties
+
+# Generated and output files
+bin/
+gen/
+out/
+release/
+captures/
+.navigation/
+
+# APK / AAB / compiled artifacts
+*.apk
+*.aab
+*.aar
+*.ap_
+*.dex
+*.class
+
+# Keystores (NUNCA subir - credenciales de firma)
+*.jks
+*.keystore
+
+# Logs
+*.log
+
+# Python (scripts auxiliares)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Modelos ML grandes (descomenta si NO quieres versionarlos)
+# *.onnx
+# *.pt
+# *.pth
+# *.bin
+# *.safetensors
+
+# PDFs de prueba/contenido indexable (descomenta si NO quieres subirlos)
+# *.pdf
+# pdfs/
+# library/
+# data/
+
+# Base de datos local de la app
+*.db
+*.sqlite
+*.sqlite3

@@ -1,0 +1,6 @@
+# Renombra este archivo a "local.properties" y ajusta la ruta a tu SDK de Android.
+# En Zorin OS / Linux normalmente está en una de estas rutas:
+#   sdk.dir=/home/uvi/Android/Sdk
+#   sdk.dir=/opt/android-sdk
+# Android Studio normalmente lo regenera solo al abrir el proyecto.
+sdk.dir=/home/uvi/Android/Sdk

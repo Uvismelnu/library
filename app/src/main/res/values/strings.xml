@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MedSearch RAG</string>
+    <string name="app_subtitle">Búsqueda inteligente en bibliografía médica</string>
+
+    <!-- Pantalla principal -->
+    <string name="select_folder">Seleccionar carpeta de libros</string>
+    <string name="folder_selected">Carpeta: %1$s</string>
+    <string name="no_folder_selected">Aún no has seleccionado una carpeta</string>
+    <string name="index_library">Indexar biblioteca</string>
+    <string name="reindex_library">Reindexar biblioteca</string>
+    <string name="indexed_books">Libros indexados: %1$d</string>
+    <string name="indexed_pages">Páginas indexadas: %1$d</string>
+    <string name="search_hint">Buscar término clínico (ej. \"fibrilación auricular\")</string>
+    <string name="search">Buscar</string>
+    <string name="summarize_with_ai">Resumir con IA</string>
+    <string name="open_settings">Configuración</string>
+
+    <!-- Configuración -->
+    <string name="settings">Configuración</string>
+    <string name="model_status">Estado del modelo</string>
+    <string name="model_loaded">Modelo cargado: %1$s</string>
+    <string name="model_not_loaded">Modelo no cargado</string>
+    <string name="model_path_hint">Coloca el archivo .task de Gemma en /Android/data/com.medsearch.rag/files/llm/</string>
+    <string name="select_model_file">Seleccionar archivo del modelo (.task)</string>
+    <string name="enable_ocr">Habilitar OCR para PDFs escaneados</string>
+    <string name="ocr_warning">El OCR es 10-50x más lento. Úsalo solo si tus PDFs son escaneados.</string>
+    <string name="max_chunks_for_rag">Máximo de fragmentos para RAG: %1$d</string>
+    <string name="clear_index">Borrar índice</string>
+    <string name="clear_index_confirm">¿Borrar todo el índice? Tendrás que reindexar.</string>
+
+    <!-- Indexación -->
+    <string name="indexing_in_progress">Indexando…</string>
+    <string name="indexing_book">Procesando: %1$s</string>
+    <string name="indexing_page">Página %1$d / %2$d</string>
+    <string name="indexing_done">Indexación completa</string>
+    <string name="indexing_failed">Error al indexar</string>
+
+    <!-- Búsqueda -->
+    <string name="results_count">%1$d resultados en %2$d libros</string>
+    <string name="page_number">Página %1$d</string>
+    <string name="no_results">Sin resultados para esta búsqueda</string>
+    <string name="search_in_progress">Buscando…</string>
+    <string name="ai_summary">Resumen generado</string>
+    <string name="generating_summary">Generando resumen con el modelo local…</string>
+    <string name="summary_disclaimer">Este resumen es generado por IA local sobre los pasajes encontrados. Verifica siempre con la fuente original. No constituye consejo médico vinculante.</string>
+
+    <!-- Errores -->
+    <string name="error_no_folder">Debes seleccionar una carpeta primero</string>
+    <string name="error_no_model">El modelo Gemma no está disponible. Configúralo en Ajustes.</string>
+    <string name="error_empty_index">El índice está vacío. Indexa primero la biblioteca.</string>
+
+    <!-- Disclaimer médico -->
+    <string name="medical_disclaimer">Esta aplicación es una herramienta de apoyo bibliográfico para profesionales de la salud. No sustituye el juicio clínico ni constituye diagnóstico médico.</string>
+
+    <string name="accept">Aceptar</string>
+    <string name="cancel">Cancelar</string>
+    <string name="close">Cerrar</string>
+</resources>
