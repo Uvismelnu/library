@@ -40,15 +40,13 @@ interface BookDao {
     suspend fun findById(id: Long): BookEntity?
 }
 
-/**
- * Resultado proyectado de una búsqueda FTS con snippet y ranking BM25-like.
- */
 data class SearchHit(
     val chunkId: Long,
     val bookId: Long,
     val bookTitle: String,
     val pageNumber: Int,
     val snippet: String,
+    val fullText: String,
     val rank: Double
 )
 
@@ -64,14 +62,6 @@ interface PageChunkDao {
     @Query("SELECT * FROM page_chunks WHERE id IN (:ids)")
     suspend fun findByIds(ids: List<Long>): List<PageChunkEntity>
 
-    /**
-     * Búsqueda FTS4 con snippets contextuales. La función `snippet()` de SQLite FTS
-     * devuelve un fragmento marcado con [[HIT]]...[[/HIT]] alrededor de las palabras
-     * que matchearon. `matchinfo(...)` provee datos para ranking aproximado tipo BM25.
-     *
-     * Nota: SQLite FTS4 no tiene BM25 nativo (FTS5 sí), así que usamos
-     * `offsets(page_chunks_fts)` y conteo de hits como aproximación.
-     */
     @Query(
         """
         SELECT
@@ -80,6 +70,7 @@ interface PageChunkDao {
             b.displayName    AS bookTitle,
             pc.pageNumber    AS pageNumber,
             snippet(page_chunks_fts, '[[HIT]]', '[[/HIT]]', '…', -1, 32) AS snippet,
+            pc.text          AS fullText,
             CAST(length(pc.text) AS REAL) / 
                 (length(pc.text) - length(replace(lower(pc.text), lower(:plainTerm), '')) + 1) AS rank
         FROM page_chunks_fts

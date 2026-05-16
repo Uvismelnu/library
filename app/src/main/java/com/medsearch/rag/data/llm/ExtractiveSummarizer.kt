@@ -6,8 +6,8 @@ object ExtractiveSummarizer {
 
     private const val MIN_QUERY_TERM_LENGTH = 3
     private const val OPTIMAL_SENTENCE_MIN = 60
-    private const val OPTIMAL_SENTENCE_MAX = 200
-    private const val SENTENCE_MIN_VALID = 30
+    private const val OPTIMAL_SENTENCE_MAX = 220
+    private const val SENTENCE_MIN_VALID = 40
     private const val SENTENCE_MAX_VALID = 400
 
     private val STOP_WORDS = setOf(
@@ -26,6 +26,45 @@ object ExtractiveSummarizer {
     )
 
     private val SENTENCE_SPLIT = Regex("(?<=[.!?])\\s+(?=[A-ZÁÉÍÓÚÑ¿¡])")
+
+    private val BIBLIO_PATTERN = Regex(
+        """\b(et al\.?|eds?\.|in:|[0-9]{1,2}(st|nd|rd|th)\s+ed\.?|textbook|j\s+am\s+coll|circulation|n\s+engl\s+j)\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val FIGURE_PATTERN = Regex(
+        """\b(figura|figure|tabla|table|cuadro|gráfico|grafico|esquema)\s*[0-9]""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val STARTS_WITH_NUMBER = Regex("""^\s*[0-9]""")
+
+    private fun cleanForSentences(raw: String): String {
+        return raw
+            .replace("[[HIT]]", "")
+            .replace("[[/HIT]]", "")
+            .replace("«", "")
+            .replace("»", "")
+            .replace(Regex("(?<![.!?])\\n+"), " ")
+            .replace(Regex("[ \\t]+"), " ")
+            .trim()
+    }
+
+    private fun isNoise(sentence: String): Boolean {
+        val s = sentence.trim()
+        if (s.length !in SENTENCE_MIN_VALID..SENTENCE_MAX_VALID) return true
+        if (STARTS_WITH_NUMBER.containsMatchIn(s)) return true
+        if (BIBLIO_PATTERN.containsMatchIn(s)) return true
+        if (FIGURE_PATTERN.containsMatchIn(s)) return true
+        val digitCount = s.count { it.isDigit() }
+        if (digitCount > s.length * 0.18) return true
+        val words = s.split(Regex("\\s+"))
+        val allCapsShort = words.count { it.length in 2..5 && it == it.uppercase() && it.any { c -> c.isLetter() } }
+        if (words.isNotEmpty() && allCapsShort > words.size * 0.4) return true
+        val realWords = words.count { it.length >= 3 && it.any { c -> c.isLetter() } }
+        if (realWords < 6) return true
+        return false
+    }
 
     data class RankedSentence(
         val text: String,
@@ -59,13 +98,12 @@ object ExtractiveSummarizer {
 
         val allRanked = mutableListOf<RankedSentence>()
         hits.forEachIndexed { hitIdx, hit ->
-            val cleanedSnippet = hit.snippet
-                .replace("[[HIT]]", "")
-                .replace("[[/HIT]]", "")
+            val source = hit.fullText.ifBlank { hit.snippet }
+            val cleaned = cleanForSentences(source)
 
-            val sentences = SENTENCE_SPLIT.split(cleanedSnippet)
+            val sentences = SENTENCE_SPLIT.split(cleaned)
                 .map { it.trim() }
-                .filter { it.length in SENTENCE_MIN_VALID..SENTENCE_MAX_VALID }
+                .filter { !isNoise(it) }
 
             sentences.forEachIndexed { sentIdx, sentence ->
                 val score = scoreSentence(sentence, queryTerms)
@@ -85,8 +123,8 @@ object ExtractiveSummarizer {
 
         if (allRanked.isEmpty()) {
             return ExtractiveResult(
-                summary = "Se encontraron pasajes pero ninguna oración coincide claramente. " +
-                        "Revisa los resultados originales abajo.",
+                summary = "Se encontraron pasajes pero ninguna oración limpia coincide. " +
+                        "Revisa los resultados originales abajo (pueden contener tablas o referencias).",
                 citedHits = hits,
                 hadResults = true
             )
@@ -94,12 +132,12 @@ object ExtractiveSummarizer {
 
         val topSentences = allRanked
             .sortedByDescending { it.score }
-            .distinctBy { it.text.take(50).lowercase() }
+            .distinctBy { it.text.take(60).lowercase() }
             .take(maxSentences)
             .sortedBy { it.originalOrder }
 
         val summaryText = buildString {
-            appendLine("**Síntesis bibliográfica (extractive, sin LLM):**")
+            appendLine("Oraciones literales de tus libros que coinciden con la búsqueda:")
             appendLine()
             topSentences.forEach { sent ->
                 append("• ")
@@ -107,14 +145,11 @@ object ExtractiveSummarizer {
                 if (!sent.text.endsWith(".") && !sent.text.endsWith("?") && !sent.text.endsWith("!")) {
                     append(".")
                 }
-                append(" *[${sent.bookTitle}, p. ${sent.pageNumber}]*")
+                append(" [${sent.bookTitle}, p. ${sent.pageNumber}]")
                 appendLine()
                 appendLine()
             }
-            appendLine("---")
-            append("_Resumen generado sin LLM (extractive). Cada oración es literal del libro citado. ")
-            append("Activa el LLM en Ajustes para resúmenes reescritos._")
-        }
+        }.trimEnd()
 
         val citedBookPages = topSentences.map { "${it.bookTitle}|${it.pageNumber}" }.toSet()
         val citedHits = hits.filter { "${it.bookTitle}|${it.pageNumber}" in citedBookPages }
