@@ -6,7 +6,6 @@ import android.content.Intent
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
@@ -18,14 +17,13 @@ import com.medsearch.rag.data.local.dao.SearchHit
 import com.medsearch.rag.data.repository.PreferencesRepository
 import com.medsearch.rag.data.repository.RagResult
 import com.medsearch.rag.data.repository.SearchRepository
+import com.medsearch.rag.data.repository.SummaryResult
 import com.medsearch.rag.worker.IndexingWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -51,9 +49,22 @@ sealed interface SearchUiState {
     data class Error(val message: String) : SearchUiState
 }
 
+/** Estado del resumen extractive (instantáneo, sin LLM, automático al buscar). */
+sealed interface ExtractiveUiState {
+    data object Idle : ExtractiveUiState
+    data class Ready(val answer: String, val hits: List<SearchHit>) : ExtractiveUiState
+}
+
+/** Estado del resumen con LLM (opcional, bajo demanda, con streaming de tokens). */
 sealed interface RagUiState {
     data object Idle : RagUiState
     data object Generating : RagUiState
+    /** Texto parcial llegando token por token. isStreaming=false cuando terminó. */
+    data class Streaming(
+        val partialText: String,
+        val hits: List<SearchHit>,
+        val isStreaming: Boolean
+    ) : RagUiState
     data class Ready(val result: RagResult) : RagUiState
     data class Error(val message: String) : RagUiState
 }
@@ -74,6 +85,9 @@ class SearchViewModel @Inject constructor(
 
     private val _search = MutableStateFlow<SearchUiState>(SearchUiState.Idle)
     val search: StateFlow<SearchUiState> = _search.asStateFlow()
+
+    private val _extractive = MutableStateFlow<ExtractiveUiState>(ExtractiveUiState.Idle)
+    val extractive: StateFlow<ExtractiveUiState> = _extractive.asStateFlow()
 
     private val _rag = MutableStateFlow<RagUiState>(RagUiState.Idle)
     val rag: StateFlow<RagUiState> = _rag.asStateFlow()
@@ -96,7 +110,7 @@ class SearchViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
-            preferences.modelPath.collect { path ->
+            preferences.modelPath.collect { _ ->
                 _home.update {
                     it.copy(modelLoaded = llmEngine.isLoaded, modelName = llmEngine.loadedFileName)
                 }
@@ -140,7 +154,7 @@ class SearchViewModel @Inject constructor(
             // Liberamos el modelo LLM para dar toda la RAM al indexador
             llmEngine.unload()
             _home.update { it.copy(modelLoaded = false, modelName = null) }
-            
+
             val uri = _home.value.folderUri ?: return@launch
             val req = OneTimeWorkRequestBuilder<IndexingWorker>()
                 .setInputData(
@@ -156,14 +170,35 @@ class SearchViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Búsqueda + resumen extractive automático (instantáneo, sin LLM).
+     * NO carga el LLM aquí: buscar debe ser rápido. El LLM se invoca
+     * solo cuando el usuario pulsa "Resumir con IA".
+     */
     fun runSearch(term: String) {
         if (term.isBlank()) return
         _search.value = SearchUiState.Searching
+        _extractive.value = ExtractiveUiState.Idle
+        _rag.value = RagUiState.Idle
+
         viewModelScope.launch {
-            ensureModelLoaded()
             val hits = searchRepository.search(term, limit = 80)
-            _search.value = if (hits.isEmpty()) SearchUiState.Empty(term)
-            else SearchUiState.Results(term, hits)
+            if (hits.isEmpty()) {
+                _search.value = SearchUiState.Empty(term)
+                return@launch
+            }
+            _search.value = SearchUiState.Results(term, hits)
+
+            // Resumen extractive automático: instantáneo, cero alucinaciones
+            when (val result = searchRepository.smartSummarize(term, topK = _home.value.maxChunksForRag)) {
+                is SummaryResult.Extractive ->
+                    _extractive.value = ExtractiveUiState.Ready(result.answer, result.usedHits)
+                is SummaryResult.LlmGenerated ->
+                    // Si por alguna razón el LLM ya estaba cargado, mostrarlo igual como extractive-like
+                    _extractive.value = ExtractiveUiState.Ready(result.answer, result.usedHits)
+                is SummaryResult.NoResults ->
+                    _extractive.value = ExtractiveUiState.Idle
+            }
         }
     }
 
@@ -181,24 +216,54 @@ class SearchViewModel @Inject constructor(
 
     fun clearSearch() {
         _search.value = SearchUiState.Idle
+        _extractive.value = ExtractiveUiState.Idle
         _rag.value = RagUiState.Idle
     }
 
+    /**
+     * Resumen con LLM bajo demanda, con streaming de tokens en vivo.
+     * Solo se invoca al pulsar el botón "Resumir con IA".
+     */
     fun summarizeCurrent() {
         val s = _search.value
         if (s !is SearchUiState.Results) return
+
         _rag.value = RagUiState.Generating
         viewModelScope.launch {
             ensureModelLoaded()
             if (!llmEngine.isLoaded) {
-                _rag.value = RagUiState.Error("Modelo no cargado. Configúralo en Ajustes.")
+                _rag.value = RagUiState.Error(
+                    "Modelo no cargado. Configura un .task en Ajustes para el resumen con IA."
+                )
                 return@launch
             }
-            val res = searchRepository.ragSummarize(s.term, topK = _home.value.maxChunksForRag)
-            _rag.value = res.fold(
-                onSuccess = { RagUiState.Ready(it) },
-                onFailure = { RagUiState.Error(it.message ?: "Error generando resumen") }
-            )
+
+            try {
+                searchRepository.smartSummarizeStream(s.term, topK = _home.value.maxChunksForRag)
+                    .collect { result ->
+                        _rag.value = when (result) {
+                            is SummaryResult.LlmGenerated -> RagUiState.Streaming(
+                                partialText = result.answer,
+                                hits = result.usedHits,
+                                isStreaming = result.isStreaming
+                            )
+                            is SummaryResult.Extractive -> RagUiState.Error(
+                                result.fallbackReason
+                                    ?: "El LLM no pudo generar. Revisa el resumen extractive arriba."
+                            )
+                            is SummaryResult.NoResults -> RagUiState.Error(result.message)
+                        }
+                    }
+                // El flow terminó. Si el último estado fue Streaming, marcarlo como completo.
+                val current = _rag.value
+                if (current is RagUiState.Streaming) {
+                    _rag.value = current.copy(isStreaming = false)
+                }
+            } catch (t: Throwable) {
+                _rag.value = RagUiState.Error(
+                    "Error generando resumen: ${t.localizedMessage ?: "desconocido"}"
+                )
+            }
         }
     }
 

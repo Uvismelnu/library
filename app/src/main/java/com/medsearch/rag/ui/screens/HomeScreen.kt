@@ -16,8 +16,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -30,6 +28,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.medsearch.rag.R
 import com.medsearch.rag.data.local.dao.SearchHit
+import com.medsearch.rag.ui.ExtractiveUiState
 import com.medsearch.rag.ui.HomeUiState
 import com.medsearch.rag.ui.RagUiState
 import com.medsearch.rag.ui.SearchUiState
@@ -45,12 +44,12 @@ fun HomeScreen(
 ) {
     val home by viewModel.home.collectAsState()
     val search by viewModel.search.collectAsState()
+    val extractive by viewModel.extractive.collectAsState()
     val rag by viewModel.rag.collectAsState()
 
     val focus = LocalFocusManager.current
     var query by rememberSaveable { mutableStateOf("") }
 
-    // Launcher para SAF ACTION_OPEN_DOCUMENT_TREE
     val folderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -136,7 +135,14 @@ fun HomeScreen(
                 )
             }
 
-            // Acción RAG
+            // 1. Síntesis extractive automática (instantánea, cero alucinaciones)
+            if (search is SearchUiState.Results && extractive is ExtractiveUiState.Ready) {
+                item {
+                    ExtractiveCard(state = extractive as ExtractiveUiState.Ready)
+                }
+            }
+
+            // 2. Acción RAG con LLM (bajo demanda) + resultado streaming
             if (search is SearchUiState.Results) {
                 item {
                     RagActionRow(
@@ -145,18 +151,26 @@ fun HomeScreen(
                         onSummarize = viewModel::summarizeCurrent
                     )
                 }
-                if (rag is RagUiState.Ready) {
-                    item {
-                        RagAnswerCard(result = (rag as RagUiState.Ready).result)
+                when (val r = rag) {
+                    is RagUiState.Streaming -> item {
+                        RagStreamingCard(
+                            text = r.partialText,
+                            hits = r.hits,
+                            isStreaming = r.isStreaming,
+                            modelName = home.modelName
+                        )
                     }
-                } else if (rag is RagUiState.Error) {
-                    item {
-                        ErrorBanner((rag as RagUiState.Error).message)
+                    is RagUiState.Ready -> item {
+                        RagAnswerCard(result = r.result)
                     }
+                    is RagUiState.Error -> item {
+                        ErrorBanner(r.message)
+                    }
+                    else -> Unit
                 }
             }
 
-            // Resultados FTS
+            // 3. Resultados FTS crudos
             when (val s = search) {
                 is SearchUiState.Idle -> Unit
                 is SearchUiState.Searching -> item { LoadingCard(stringResource(R.string.search_in_progress)) }
@@ -343,12 +357,67 @@ private fun SearchField(
     )
 }
 
+/**
+ * Card de síntesis extractive: aparece automáticamente al buscar.
+ * Texto literal de los libros, cero alucinaciones, instantáneo.
+ * Distinción visual: chip 📖 "Texto del libro".
+ */
+@Composable
+private fun ExtractiveCard(state: ExtractiveUiState.Ready) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+        )
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Outlined.MenuBook,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Síntesis bibliográfica",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.weight(1f)
+                )
+                AssistChip(
+                    onClick = { },
+                    label = { Text("📖 Literal", style = MaterialTheme.typography.labelSmall) },
+                    colors = AssistChipDefaults.assistChipColors(
+                        containerColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f)
+                    )
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                state.answer,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Cada oración es literal del libro citado. Sin reescritura por IA.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.75f)
+            )
+        }
+    }
+}
+
 @Composable
 private fun RagActionRow(
     modelLoaded: Boolean,
     ragState: RagUiState,
     onSummarize: () -> Unit
 ) {
+    val isWorking = ragState is RagUiState.Generating ||
+            (ragState is RagUiState.Streaming && ragState.isStreaming)
+
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
@@ -364,7 +433,7 @@ private fun RagActionRow(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "RAG: síntesis con modelo local",
+                    "Resumen reescrito con IA",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -372,19 +441,19 @@ private fun RagActionRow(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                if (modelLoaded) "Genera un resumen bibliográfico integrando los pasajes encontrados, con citas."
-                else "Configura un modelo LLM .task en Ajustes para activar el resumen automático.",
+                if (modelLoaded) "Genera un resumen integrado y reescrito de los pasajes. Tarda 30-90s. Puede contener imprecisiones — verifica con el texto literal de arriba."
+                else "Configura un modelo LLM .task en Ajustes para activar el resumen reescrito. El resumen literal de arriba ya está disponible sin modelo.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
             )
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = onSummarize,
-                enabled = modelLoaded && ragState !is RagUiState.Generating,
+                enabled = modelLoaded && !isWorking,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp)
             ) {
-                if (ragState is RagUiState.Generating) {
+                if (isWorking) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,
@@ -397,6 +466,85 @@ private fun RagActionRow(
                     Spacer(Modifier.width(8.dp))
                     Text(stringResource(R.string.summarize_with_ai))
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Card del resumen LLM con streaming: el texto aparece token por token.
+ * Distinción visual: chip 🤖 "IA — verificar".
+ */
+@Composable
+private fun RagStreamingCard(
+    text: String,
+    hits: List<SearchHit>,
+    isStreaming: Boolean,
+    modelName: String?
+) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Outlined.AutoAwesome,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    stringResource(R.string.ai_summary),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.weight(1f)
+                )
+                if (isStreaming) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                } else {
+                    AssistChip(
+                        onClick = { },
+                        label = { Text("🤖 IA", style = MaterialTheme.typography.labelSmall) },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                        )
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text.ifBlank { "Generando…" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            if (!isStreaming && hits.isNotEmpty()) {
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f))
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Fuentes utilizadas:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                hits.forEach { hit ->
+                    Text(
+                        "• ${hit.bookTitle} — p. ${hit.pageNumber}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    stringResource(R.string.summary_disclaimer),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f)
+                )
             }
         }
     }
