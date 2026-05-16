@@ -111,8 +111,8 @@ fun HomeScreen(
                     )
                     StatCard(
                         label = "LLM",
-                        value = if (home.modelLoaded) "ON" else "OFF",
-                        accent = if (home.modelLoaded) MaterialTheme.colorScheme.primary
+                        value = if (home.modelConfigured) "ON" else "OFF",
+                        accent = if (home.modelConfigured) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.error,
                         modifier = Modifier.weight(1f)
                     )
@@ -146,7 +146,7 @@ fun HomeScreen(
             if (search is SearchUiState.Results) {
                 item {
                     RagActionRow(
-                        modelLoaded = home.modelLoaded,
+                        modelConfigured = home.modelConfigured,
                         ragState = rag,
                         onSummarize = viewModel::summarizeCurrent
                     )
@@ -411,7 +411,7 @@ private fun ExtractiveCard(state: ExtractiveUiState.Ready) {
 
 @Composable
 private fun RagActionRow(
-    modelLoaded: Boolean,
+    modelConfigured: Boolean,
     ragState: RagUiState,
     onSummarize: () -> Unit
 ) {
@@ -441,7 +441,7 @@ private fun RagActionRow(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                if (modelLoaded) "Genera un resumen integrado y reescrito de los pasajes. Tarda 30-90s. Puede contener imprecisiones — verifica con el texto literal de arriba."
+                if (modelConfigured) "Genera un resumen integrado y reescrito de los pasajes. Tarda 30-90s. Puede contener imprecisiones — verifica con el texto literal de arriba."
                 else "Configura un modelo LLM .task en Ajustes para activar el resumen reescrito. El resumen literal de arriba ya está disponible sin modelo.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -449,7 +449,7 @@ private fun RagActionRow(
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = onSummarize,
-                enabled = modelLoaded && !isWorking,
+                enabled = modelConfigured && !isWorking,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp)
             ) {

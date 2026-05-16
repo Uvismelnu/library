@@ -36,7 +36,9 @@ data class HomeUiState(
     val indexing: IndexProgress = IndexProgress(),
     val ocrEnabled: Boolean = false,
     val maxChunksForRag: Int = 6,
-    val modelLoaded: Boolean = false,
+    // modelConfigured = hay un .bin/.task seleccionado y disponible.
+    // NO significa que esté cargado en RAM (eso solo ocurre durante la generación).
+    val modelConfigured: Boolean = false,
     val modelName: String? = null,
     val disclaimerAck: Boolean = false
 )
@@ -59,7 +61,6 @@ sealed interface ExtractiveUiState {
 sealed interface RagUiState {
     data object Idle : RagUiState
     data object Generating : RagUiState
-    /** Texto parcial llegando token por token. isStreaming=false cuando terminó. */
     data class Streaming(
         val partialText: String,
         val hits: List<SearchHit>,
@@ -109,10 +110,15 @@ class SearchViewModel @Inject constructor(
                 _home.update { it.copy(disclaimerAck = ack) }
             }
         }
+        // El modelo se considera "configurado" si hay una ruta guardada.
+        // NUNCA se carga a RAM aquí (eso causaba el OOM).
         viewModelScope.launch {
-            preferences.modelPath.collect { _ ->
+            preferences.modelPath.collect { path ->
                 _home.update {
-                    it.copy(modelLoaded = llmEngine.isLoaded, modelName = llmEngine.loadedFileName)
+                    it.copy(
+                        modelConfigured = path != null,
+                        modelName = path?.let { p -> java.io.File(p).name }
+                    )
                 }
             }
         }
@@ -151,9 +157,8 @@ class SearchViewModel @Inject constructor(
 
     fun startIndexing() {
         viewModelScope.launch {
-            // Liberamos el modelo LLM para dar toda la RAM al indexador
+            // Garantizar que el LLM no esté en RAM durante la indexación
             llmEngine.unload()
-            _home.update { it.copy(modelLoaded = false, modelName = null) }
 
             val uri = _home.value.folderUri ?: return@launch
             val req = OneTimeWorkRequestBuilder<IndexingWorker>()
@@ -171,9 +176,12 @@ class SearchViewModel @Inject constructor(
     }
 
     /**
-     * Búsqueda + resumen extractive automático (instantáneo, sin LLM).
-     * NO carga el LLM aquí: buscar debe ser rápido. El LLM se invoca
-     * solo cuando el usuario pulsa "Resumir con IA".
+     * Búsqueda + resumen extractive automático.
+     *
+     * CRÍTICO PARA EVITAR OOM:
+     *  - Descarga el LLM de RAM si estuviera cargado (libera ~2.5 GB).
+     *  - El resumen automático es SIEMPRE extractive, NUNCA toca el LLM.
+     *  - Buscar debe ser ligero: sin modelo en memoria.
      */
     fun runSearch(term: String) {
         if (term.isBlank()) return
@@ -182,6 +190,11 @@ class SearchViewModel @Inject constructor(
         _rag.value = RagUiState.Idle
 
         viewModelScope.launch {
+            // Liberar RAM del LLM antes de buscar (previene el OOM kill)
+            if (llmEngine.isLoaded) {
+                llmEngine.unload()
+            }
+
             val hits = searchRepository.search(term, limit = 80)
             if (hits.isEmpty()) {
                 _search.value = SearchUiState.Empty(term)
@@ -189,27 +202,20 @@ class SearchViewModel @Inject constructor(
             }
             _search.value = SearchUiState.Results(term, hits)
 
-            // Resumen extractive automático: instantáneo, cero alucinaciones
-            when (val result = searchRepository.smartSummarize(term, topK = _home.value.maxChunksForRag)) {
+            // Resumen extractive: SIEMPRE sin LLM. Usamos la función dedicada
+            // del repo que no depende de si el modelo está cargado.
+            val extractiveResult = searchRepository.extractiveOnly(
+                term,
+                topK = _home.value.maxChunksForRag
+            )
+            when (extractiveResult) {
                 is SummaryResult.Extractive ->
-                    _extractive.value = ExtractiveUiState.Ready(result.answer, result.usedHits)
-                is SummaryResult.LlmGenerated ->
-                    // Si por alguna razón el LLM ya estaba cargado, mostrarlo igual como extractive-like
-                    _extractive.value = ExtractiveUiState.Ready(result.answer, result.usedHits)
-                is SummaryResult.NoResults ->
+                    _extractive.value = ExtractiveUiState.Ready(
+                        extractiveResult.answer,
+                        extractiveResult.usedHits
+                    )
+                else ->
                     _extractive.value = ExtractiveUiState.Idle
-            }
-        }
-    }
-
-    private suspend fun ensureModelLoaded() {
-        if (!llmEngine.isLoaded) {
-            val path = preferences.modelPath.first()
-            if (path != null) {
-                llmEngine.load(context, path)
-                _home.update {
-                    it.copy(modelLoaded = llmEngine.isLoaded, modelName = llmEngine.loadedFileName)
-                }
             }
         }
     }
@@ -221,8 +227,15 @@ class SearchViewModel @Inject constructor(
     }
 
     /**
-     * Resumen con LLM bajo demanda, con streaming de tokens en vivo.
-     * Solo se invoca al pulsar el botón "Resumir con IA".
+     * Resumen con LLM bajo demanda (botón "Resumir con IA").
+     *
+     * CICLO DE VIDA DEL MODELO (para no exceder RAM):
+     *  1. Cargar el modelo a RAM justo ahora.
+     *  2. Generar con streaming.
+     *  3. Descargar el modelo de RAM al terminar (o si falla).
+     *
+     * Así el modelo solo ocupa ~2.5 GB durante los 30-90s de generación,
+     * no permanentemente.
      */
     fun summarizeCurrent() {
         val s = _search.value
@@ -230,14 +243,27 @@ class SearchViewModel @Inject constructor(
 
         _rag.value = RagUiState.Generating
         viewModelScope.launch {
-            ensureModelLoaded()
-            if (!llmEngine.isLoaded) {
+            // 1. Cargar el modelo bajo demanda
+            val modelPath = preferences.modelPath.first()
+            if (modelPath == null) {
                 _rag.value = RagUiState.Error(
-                    "Modelo no cargado. Configura un .task en Ajustes para el resumen con IA."
+                    "No hay modelo configurado. Selecciona un .bin/.task en Ajustes."
                 )
                 return@launch
             }
 
+            val loadResult = llmEngine.load(context, modelPath)
+            if (loadResult.isFailure || !llmEngine.isLoaded) {
+                _rag.value = RagUiState.Error(
+                    "No se pudo cargar el modelo: " +
+                        "${loadResult.exceptionOrNull()?.localizedMessage ?: "memoria insuficiente"}. " +
+                        "El resumen literal de arriba sí está disponible."
+                )
+                llmEngine.unload()
+                return@launch
+            }
+
+            // 2. Generar con streaming
             try {
                 searchRepository.smartSummarizeStream(s.term, topK = _home.value.maxChunksForRag)
                     .collect { result ->
@@ -249,12 +275,11 @@ class SearchViewModel @Inject constructor(
                             )
                             is SummaryResult.Extractive -> RagUiState.Error(
                                 result.fallbackReason
-                                    ?: "El LLM no pudo generar. Revisa el resumen extractive arriba."
+                                    ?: "El LLM no pudo generar. Revisa el resumen literal arriba."
                             )
                             is SummaryResult.NoResults -> RagUiState.Error(result.message)
                         }
                     }
-                // El flow terminó. Si el último estado fue Streaming, marcarlo como completo.
                 val current = _rag.value
                 if (current is RagUiState.Streaming) {
                     _rag.value = current.copy(isStreaming = false)
@@ -263,6 +288,10 @@ class SearchViewModel @Inject constructor(
                 _rag.value = RagUiState.Error(
                     "Error generando resumen: ${t.localizedMessage ?: "desconocido"}"
                 )
+            } finally {
+                // 3. SIEMPRE descargar el modelo de RAM al terminar.
+                // Esto es lo que evita el OOM en búsquedas posteriores.
+                llmEngine.unload()
             }
         }
     }
@@ -270,14 +299,22 @@ class SearchViewModel @Inject constructor(
     fun setOcrEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOcrEnabled(enabled) }
     fun setMaxChunks(n: Int) = viewModelScope.launch { preferences.setMaxChunksForRag(n) }
 
+    /**
+     * Selecciona/deselecciona el modelo. CLAVE: solo guarda la ruta en
+     * preferencias. NO carga el modelo a RAM (eso causaba el OOM al
+     * dejarlo cargado permanentemente). El modelo se carga solo durante
+     * summarizeCurrent() y se descarga al terminar.
+     */
     fun setModelPath(path: String?) = viewModelScope.launch {
+        // Si había algo cargado, liberarlo
+        llmEngine.unload()
         preferences.setModelPath(path)
-        if (path != null) {
-            llmEngine.load(context, path)
-        } else {
-            llmEngine.unload()
+        _home.update {
+            it.copy(
+                modelConfigured = path != null,
+                modelName = path?.let { p -> java.io.File(p).name }
+            )
         }
-        _home.update { it.copy(modelLoaded = llmEngine.isLoaded, modelName = llmEngine.loadedFileName) }
     }
 
     fun availableModels() = llmEngine.availableModels(context)

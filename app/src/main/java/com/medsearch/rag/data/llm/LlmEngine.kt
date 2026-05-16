@@ -18,7 +18,7 @@ import javax.inject.Singleton
 class LlmEngine @Inject constructor() {
 
     companion object {
-        private const val MAX_TOKENS_OUTPUT = 2048
+        private const val MAX_TOKENS_OUTPUT = 384
         private const val MAX_TOP_K = 40
         private const val MODEL_SUBDIR = "llm"
     }
@@ -39,7 +39,7 @@ class LlmEngine @Inject constructor() {
     fun availableModels(context: Context): List<File> {
         val dir = modelDir(context)
         if (!dir.exists()) dir.mkdirs()
-        return dir.listFiles { f -> f.isFile && f.extension == "task" }?.toList().orEmpty()
+        return dir.listFiles { f -> f.isFile && (f.extension == "task" || f.extension == "bin") }?.toList().orEmpty()
     }
 
     fun modelDir(context: Context): File =

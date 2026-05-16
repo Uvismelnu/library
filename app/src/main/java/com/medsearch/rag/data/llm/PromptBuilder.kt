@@ -2,26 +2,24 @@ package com.medsearch.rag.data.llm
 
 import com.medsearch.rag.data.local.dao.SearchHit
 
-/**
- * Construye prompts RAG para Gemma-it / Phi-3-instruct.
- *
- * Estrategia:
- *  - Mensaje de sistema fijo en español, en tono clínico cauto
- *  - Contexto = top N snippets recuperados de FTS, cada uno con su cita
- *  - Pregunta del usuario al final
- *  - Pedimos respuesta estructurada con secciones explícitas
- */
 object PromptBuilder {
 
-    private const val SYSTEM = """Eres un asistente bibliográfico médico que ayuda a un profesional de la salud a sintetizar pasajes extraídos de su biblioteca clínica.
+    private const val SYSTEM = """Eres un asistente que PARAFRASEA pasajes médicos. NO eres un experto médico y NO debes usar tu propio conocimiento.
 
-Reglas estrictas:
-1. Responde EXCLUSIVAMENTE en base a los pasajes proporcionados. No agregues información que no esté ahí.
-2. Cita la fuente entre corchetes con formato [Libro, p. N] al final de cada afirmación.
-3. Si los pasajes no contienen información suficiente para responder, indícalo con honestidad.
-4. Usa lenguaje técnico apropiado para un médico. Responde en español.
-5. NO ofrezcas un diagnóstico definitivo; ofrece síntesis bibliográfica.
-6. Si los pasajes muestran conflicto entre fuentes, señálalo."""
+REGLAS ABSOLUTAS:
+1. SOLO puedes usar información literal de los PASAJES proporcionados abajo.
+2. PROHIBIDO agregar datos, definiciones o explicaciones que NO estén textualmente en los pasajes, AUNQUE creas saberlos.
+3. Si los pasajes no explican algo, escribe: "Los pasajes no detallan esto." NO lo inventes.
+4. Cada afirmación tuya debe corresponder a un pasaje concreto. Cita así: [Pasaje N].
+5. Si no entiendes un pasaje, cítalo textualmente entre comillas en vez de reformularlo.
+6. Responde en español clínico, breve. NO des diagnósticos. NO uses palabras que no existan.
+
+EJEMPLO DE LO QUE NO DEBES HACER:
+Pasaje: "El soplo continuo del conducto arterioso persistente envuelve a S2."
+MAL (inventado): "El conducto arterioso persistente es cuando la presión arterial no está normal."
+BIEN (fiel): "Según el pasaje, el soplo continuo del conducto arterioso persistente envuelve a S2 [Pasaje 1]."
+
+Si te apartas de los pasajes, fallas la tarea."""
 
     private const val MAX_SNIPPET_CHARS = 900
     private const val HIT_MARK_OPEN = "[[HIT]]"
@@ -30,28 +28,34 @@ Reglas estrictas:
     fun build(question: String, hits: List<SearchHit>): String {
         val ctx = StringBuilder()
         hits.forEachIndexed { idx, hit ->
-            val cleaned = hit.snippet
-                .replace(HIT_MARK_OPEN, "«")
-                .replace(HIT_MARK_CLOSE, "»")
+            val rawSource = if (hit.fullText.isNotBlank()) hit.fullText else hit.snippet
+            val cleaned = rawSource
+                .replace(HIT_MARK_OPEN, "")
+                .replace(HIT_MARK_CLOSE, "")
+                .replace("«", "")
+                .replace("»", "")
                 .take(MAX_SNIPPET_CHARS)
             ctx.append("[Pasaje ${idx + 1} | ${hit.bookTitle}, p. ${hit.pageNumber}]\n")
-            ctx.append(cleaned).append("\n\n")
+            ctx.append(cleaned.trim()).append("\n\n")
         }
 
         return buildString {
             appendLine("<start_of_turn>user")
             appendLine(SYSTEM)
             appendLine()
-            appendLine("=== PASAJES RECUPERADOS ===")
+            appendLine("=== PASAJES (única fuente permitida) ===")
             appendLine(ctx.toString().trim())
             appendLine("=== FIN DE PASAJES ===")
             appendLine()
             appendLine("Pregunta del médico: $question")
             appendLine()
-            appendLine("Responde con esta estructura:")
-            appendLine("**Síntesis:** (2-4 párrafos, integrando los pasajes con citas inline)")
-            appendLine("**Puntos clave:** (lista con viñetas)")
-            appendLine("**Limitaciones:** (qué no está cubierto por los pasajes)")
+            appendLine("Responde SOLO con lo que digan los pasajes, con esta estructura:")
+            appendLine()
+            appendLine("RESUMEN (parafrasea 2-4 frases fieles a los pasajes, con [Pasaje N]):")
+            appendLine()
+            appendLine("CITAS TEXTUALES RELEVANTES (copia 1-3 frases exactas entre comillas con su [Pasaje N]):")
+            appendLine()
+            appendLine("LO QUE LOS PASAJES NO CUBREN (sé honesto):")
             appendLine("<end_of_turn>")
             appendLine("<start_of_turn>model")
         }

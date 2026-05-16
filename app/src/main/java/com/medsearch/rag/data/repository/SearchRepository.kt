@@ -33,20 +33,51 @@ class SearchRepository @Inject constructor(
 
     suspend fun clearAll() = bookDao.deleteAll()
 
-    suspend fun smartSummarize(question: String, topK: Int = 6): SummaryResult {
+    /**
+     * Resumen EXCLUSIVAMENTE extractive. NUNCA toca el LLM, sin importar
+     * si está cargado o no. Esta es la función que usa la búsqueda
+     * automática para garantizar que buscar no dispare el modelo
+     * (lo que causaba el OOM kill).
+     */
+    suspend fun extractiveOnly(question: String, topK: Int = 6): SummaryResult {
         val hits = search(question, limit = topK)
         if (hits.isEmpty()) {
             return SummaryResult.NoResults(
                 message = "Sin pasajes relevantes. Indexa más libros o reformula la consulta."
             )
         }
-        return if (llmEngine.isLoaded) {
-            generateWithLlm(question, hits)
+        val extractive = ExtractiveSummarizer.summarize(question, hits)
+        return if (extractive.hadResults) {
+            SummaryResult.Extractive(
+                answer = extractive.summary,
+                usedHits = extractive.citedHits,
+                fallbackReason = null
+            )
         } else {
-            generateExtractive(question, hits)
+            SummaryResult.NoResults(message = extractive.summary)
         }
     }
 
+    /**
+     * @deprecated Esta función decide LLM vs extractive según si el modelo
+     * está cargado. Eso causaba que buscar disparara el LLM (OOM).
+     * Usa extractiveOnly() para búsqueda automática y smartSummarizeStream()
+     * para el resumen bajo demanda. Se mantiene por compatibilidad.
+     */
+    @Deprecated(
+        "Riesgo de OOM: dispara LLM si está cargado. Usa extractiveOnly() o smartSummarizeStream()",
+        ReplaceWith("extractiveOnly(question, topK)")
+    )
+    suspend fun smartSummarize(question: String, topK: Int = 6): SummaryResult {
+        return extractiveOnly(question, topK)
+    }
+
+    /**
+     * Stream del resumen con LLM. El ViewModel se encarga de cargar el
+     * modelo ANTES de llamar a esto y descargarlo DESPUÉS. Aquí asumimos
+     * que si llmEngine.isLoaded es true, fue cargado intencionalmente
+     * para esta generación.
+     */
     fun smartSummarizeStream(question: String, topK: Int = 6): Flow<SummaryResult> = flow {
         val hits = search(question, limit = topK)
         if (hits.isEmpty()) {
@@ -76,59 +107,19 @@ class SearchRepository @Inject constructor(
                 ))
             }
         } else {
+            // El modelo no se pudo cargar; dar extractive como respaldo
             val extractive = ExtractiveSummarizer.summarize(question, hits)
             emit(SummaryResult.Extractive(
                 answer = extractive.summary,
                 usedHits = extractive.citedHits,
-                fallbackReason = null
+                fallbackReason = "El modelo no está cargado. Se muestra resumen literal."
             ))
         }
     }
 
-    private suspend fun generateWithLlm(
-        question: String,
-        hits: List<SearchHit>
-    ): SummaryResult {
-        val prompt = PromptBuilder.build(question, hits)
-        return llmEngine.generate(prompt).fold(
-            onSuccess = { response ->
-                SummaryResult.LlmGenerated(
-                    answer = response.trim(),
-                    usedHits = hits,
-                    isStreaming = false
-                )
-            },
-            onFailure = { error ->
-                val extractive = ExtractiveSummarizer.summarize(question, hits)
-                SummaryResult.Extractive(
-                    answer = extractive.summary,
-                    usedHits = extractive.citedHits,
-                    fallbackReason = "LLM falló: ${error.localizedMessage}. " +
-                            "Se muestra resumen extractive."
-                )
-            }
-        )
-    }
-
-    private fun generateExtractive(
-        question: String,
-        hits: List<SearchHit>
-    ): SummaryResult {
-        val extractive = ExtractiveSummarizer.summarize(question, hits)
-        return if (extractive.hadResults) {
-            SummaryResult.Extractive(
-                answer = extractive.summary,
-                usedHits = extractive.citedHits,
-                fallbackReason = null
-            )
-        } else {
-            SummaryResult.NoResults(message = extractive.summary)
-        }
-    }
-
     @Deprecated(
-        "Usa smartSummarize() para fallback automático cuando el LLM no está cargado",
-        ReplaceWith("smartSummarize(question, topK)")
+        "Usa smartSummarizeStream() para streaming con manejo de memoria correcto",
+        ReplaceWith("smartSummarizeStream(question, topK)")
     )
     suspend fun ragSummarize(question: String, topK: Int = 6): Result<RagResult> {
         val hits = search(question, limit = topK)

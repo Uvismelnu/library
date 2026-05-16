@@ -33,7 +33,7 @@ fun SettingsScreen(
 ) {
     val home by viewModel.home.collectAsState()
     var confirmClear by remember { mutableStateOf(false) }
-    val models = remember(home.modelLoaded, home.modelName) { viewModel.availableModels() }
+    val models = remember(home.modelConfigured, home.modelName) { viewModel.availableModels() }
 
     Scaffold(
         topBar = {
@@ -81,7 +81,7 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        text = if (home.modelLoaded && home.modelName != null)
+                        text = if (home.modelConfigured && home.modelName != null)
                             stringResource(R.string.model_loaded, home.modelName!!)
                         else stringResource(R.string.model_not_loaded),
                         style = MaterialTheme.typography.bodyMedium,
@@ -97,19 +97,19 @@ fun SettingsScreen(
 
                     if (models.isEmpty()) {
                         Text(
-                            "No se encontraron archivos .task en el directorio. Cópialos manualmente con cualquier explorador de archivos.",
+                            "No se encontraron modelos (.task o .bin) en el directorio de la app. " +
+                            "Cópialos con: adb push modelo.bin /sdcard/Android/data/com.medsearch.rag/files/llm/",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
                     } else {
                         Text(
-                            "Modelos detectados:",
+                            "Modelos detectados (toca para cargar):",
                             style = MaterialTheme.typography.labelMedium
                         )
+                        Spacer(Modifier.height(4.dp))
                         models.forEach { f ->
-                            val isCurrent = f.absolutePath == home.modelName?.let { name ->
-                                models.firstOrNull { it.name == name }?.absolutePath
-                            }
+                            val isCurrent = home.modelConfigured && home.modelName == f.name
                             FilterChip(
                                 selected = isCurrent,
                                 onClick = { viewModel.setModelPath(f.absolutePath) },
@@ -117,8 +117,14 @@ fun SettingsScreen(
                                 modifier = Modifier.padding(vertical = 2.dp)
                             )
                         }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Cargar el modelo puede tardar 10-30 s. La primera generación de resumen tarda 30-90 s en este dispositivo.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    if (home.modelLoaded) {
+                    if (home.modelConfigured) {
                         Spacer(Modifier.height(8.dp))
                         OutlinedButton(
                             onClick = { viewModel.setModelPath(null) },
