@@ -12,18 +12,14 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.medsearch.rag.data.indexing.IndexProgress
 import com.medsearch.rag.data.indexing.IndexingService
-import com.medsearch.rag.data.llm.LlmEngine
-import com.medsearch.rag.data.local.dao.SearchHit
 import com.medsearch.rag.data.repository.PreferencesRepository
-import com.medsearch.rag.data.repository.RagResult
 import com.medsearch.rag.data.repository.SearchRepository
-import com.medsearch.rag.data.repository.SummaryResult
+import com.medsearch.rag.data.pdf.PdfPageRenderer
 import com.medsearch.rag.worker.IndexingWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -35,39 +31,23 @@ data class HomeUiState(
     val pageCount: Int = 0,
     val indexing: IndexProgress = IndexProgress(),
     val ocrEnabled: Boolean = false,
-    val maxChunksForRag: Int = 6,
-    // modelConfigured = hay un .bin/.task seleccionado y disponible.
-    // NO significa que esté cargado en RAM (eso solo ocurre durante la generación).
-    val modelConfigured: Boolean = false,
-    val modelName: String? = null,
     val disclaimerAck: Boolean = false
+)
+
+/** Una página de resultado: el PDF, su título y el número de página a renderizar. */
+data class PageResult(
+    val bookId: Long,
+    val bookTitle: String,
+    val bookUri: String,
+    val pageNumber: Int
 )
 
 sealed interface SearchUiState {
     data object Idle : SearchUiState
     data object Searching : SearchUiState
-    data class Results(val term: String, val hits: List<SearchHit>) : SearchUiState
+    data class Results(val term: String, val pages: List<PageResult>) : SearchUiState
     data class Empty(val term: String) : SearchUiState
     data class Error(val message: String) : SearchUiState
-}
-
-/** Estado del resumen extractive (instantáneo, sin LLM, automático al buscar). */
-sealed interface ExtractiveUiState {
-    data object Idle : ExtractiveUiState
-    data class Ready(val answer: String, val hits: List<SearchHit>) : ExtractiveUiState
-}
-
-/** Estado del resumen con LLM (opcional, bajo demanda, con streaming de tokens). */
-sealed interface RagUiState {
-    data object Idle : RagUiState
-    data object Generating : RagUiState
-    data class Streaming(
-        val partialText: String,
-        val hits: List<SearchHit>,
-        val isStreaming: Boolean
-    ) : RagUiState
-    data class Ready(val result: RagResult) : RagUiState
-    data class Error(val message: String) : RagUiState
 }
 
 @HiltViewModel
@@ -76,7 +56,7 @@ class SearchViewModel @Inject constructor(
     private val preferences: PreferencesRepository,
     private val searchRepository: SearchRepository,
     private val indexingService: IndexingService,
-    private val llmEngine: LlmEngine
+    val pdfPageRenderer: PdfPageRenderer
 ) : AndroidViewModel(app) {
 
     private val context: Context get() = getApplication()
@@ -86,12 +66,6 @@ class SearchViewModel @Inject constructor(
 
     private val _search = MutableStateFlow<SearchUiState>(SearchUiState.Idle)
     val search: StateFlow<SearchUiState> = _search.asStateFlow()
-
-    private val _extractive = MutableStateFlow<ExtractiveUiState>(ExtractiveUiState.Idle)
-    val extractive: StateFlow<ExtractiveUiState> = _extractive.asStateFlow()
-
-    private val _rag = MutableStateFlow<RagUiState>(RagUiState.Idle)
-    val rag: StateFlow<RagUiState> = _rag.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -103,23 +77,8 @@ class SearchViewModel @Inject constructor(
             preferences.ocrEnabled.collect { e -> _home.update { it.copy(ocrEnabled = e) } }
         }
         viewModelScope.launch {
-            preferences.maxChunksForRag.collect { m -> _home.update { it.copy(maxChunksForRag = m) } }
-        }
-        viewModelScope.launch {
             preferences.disclaimerAcknowledged.collect { ack ->
                 _home.update { it.copy(disclaimerAck = ack) }
-            }
-        }
-        // El modelo se considera "configurado" si hay una ruta guardada.
-        // NUNCA se carga a RAM aquí (eso causaba el OOM).
-        viewModelScope.launch {
-            preferences.modelPath.collect { path ->
-                _home.update {
-                    it.copy(
-                        modelConfigured = path != null,
-                        modelName = path?.let { p -> java.io.File(p).name }
-                    )
-                }
             }
         }
         viewModelScope.launch {
@@ -157,9 +116,6 @@ class SearchViewModel @Inject constructor(
 
     fun startIndexing() {
         viewModelScope.launch {
-            // Garantizar que el LLM no esté en RAM durante la indexación
-            llmEngine.unload()
-
             val uri = _home.value.folderUri ?: return@launch
             val req = OneTimeWorkRequestBuilder<IndexingWorker>()
                 .setInputData(
@@ -176,148 +132,57 @@ class SearchViewModel @Inject constructor(
     }
 
     /**
-     * Búsqueda + resumen extractive automático.
-     *
-     * CRÍTICO PARA EVITAR OOM:
-     *  - Descarga el LLM de RAM si estuviera cargado (libera ~2.5 GB).
-     *  - El resumen automático es SIEMPRE extractive, NUNCA toca el LLM.
-     *  - Buscar debe ser ligero: sin modelo en memoria.
+     * Busca el término y produce la lista de páginas (libro + nº de página)
+     * donde aparece, deduplicada y ordenada por libro y página.
      */
     fun runSearch(term: String) {
         if (term.isBlank()) return
         _search.value = SearchUiState.Searching
-        _extractive.value = ExtractiveUiState.Idle
-        _rag.value = RagUiState.Idle
 
         viewModelScope.launch {
-            // Liberar RAM del LLM antes de buscar (previene el OOM kill)
-            if (llmEngine.isLoaded) {
-                llmEngine.unload()
-            }
-
-            val hits = searchRepository.search(term, limit = 80)
+            val hits = searchRepository.search(term, limit = 100)
             if (hits.isEmpty()) {
                 _search.value = SearchUiState.Empty(term)
                 return@launch
             }
-            _search.value = SearchUiState.Results(term, hits)
 
-            // Resumen extractive: SIEMPRE sin LLM. Usamos la función dedicada
-            // del repo que no depende de si el modelo está cargado.
-            val extractiveResult = searchRepository.extractiveOnly(
-                term,
-                topK = _home.value.maxChunksForRag
-            )
-            when (extractiveResult) {
-                is SummaryResult.Extractive ->
-                    _extractive.value = ExtractiveUiState.Ready(
-                        extractiveResult.answer,
-                        extractiveResult.usedHits
+            // Resolver el uri de cada libro y deduplicar por (libro, página)
+            val uriCache = HashMap<Long, String?>()
+            val seen = HashSet<String>()
+            val pages = mutableListOf<PageResult>()
+
+            for (hit in hits) {
+                val uri = uriCache.getOrPut(hit.bookId) {
+                    searchRepository.bookUriById(hit.bookId)
+                } ?: continue
+
+                val key = "${hit.bookId}|${hit.pageNumber}"
+                if (key in seen) continue
+                seen.add(key)
+
+                pages.add(
+                    PageResult(
+                        bookId = hit.bookId,
+                        bookTitle = hit.bookTitle,
+                        bookUri = uri,
+                        pageNumber = hit.pageNumber
                     )
-                else ->
-                    _extractive.value = ExtractiveUiState.Idle
+                )
             }
+
+            // Orden: por título de libro, luego por número de página
+            pages.sortWith(compareBy({ it.bookTitle }, { it.pageNumber }))
+
+            _search.value = if (pages.isEmpty()) SearchUiState.Empty(term)
+            else SearchUiState.Results(term, pages)
         }
     }
 
     fun clearSearch() {
         _search.value = SearchUiState.Idle
-        _extractive.value = ExtractiveUiState.Idle
-        _rag.value = RagUiState.Idle
-    }
-
-    /**
-     * Resumen con LLM bajo demanda (botón "Resumir con IA").
-     *
-     * CICLO DE VIDA DEL MODELO (para no exceder RAM):
-     *  1. Cargar el modelo a RAM justo ahora.
-     *  2. Generar con streaming.
-     *  3. Descargar el modelo de RAM al terminar (o si falla).
-     *
-     * Así el modelo solo ocupa ~2.5 GB durante los 30-90s de generación,
-     * no permanentemente.
-     */
-    fun summarizeCurrent() {
-        val s = _search.value
-        if (s !is SearchUiState.Results) return
-
-        _rag.value = RagUiState.Generating
-        viewModelScope.launch {
-            // 1. Cargar el modelo bajo demanda
-            val modelPath = preferences.modelPath.first()
-            if (modelPath == null) {
-                _rag.value = RagUiState.Error(
-                    "No hay modelo configurado. Selecciona un .bin/.task en Ajustes."
-                )
-                return@launch
-            }
-
-            val loadResult = llmEngine.load(context, modelPath)
-            if (loadResult.isFailure || !llmEngine.isLoaded) {
-                _rag.value = RagUiState.Error(
-                    "No se pudo cargar el modelo: " +
-                        "${loadResult.exceptionOrNull()?.localizedMessage ?: "memoria insuficiente"}. " +
-                        "El resumen literal de arriba sí está disponible."
-                )
-                llmEngine.unload()
-                return@launch
-            }
-
-            // 2. Generar con streaming
-            try {
-                searchRepository.smartSummarizeStream(s.term, topK = _home.value.maxChunksForRag)
-                    .collect { result ->
-                        _rag.value = when (result) {
-                            is SummaryResult.LlmGenerated -> RagUiState.Streaming(
-                                partialText = result.answer,
-                                hits = result.usedHits,
-                                isStreaming = result.isStreaming
-                            )
-                            is SummaryResult.Extractive -> RagUiState.Error(
-                                result.fallbackReason
-                                    ?: "El LLM no pudo generar. Revisa el resumen literal arriba."
-                            )
-                            is SummaryResult.NoResults -> RagUiState.Error(result.message)
-                        }
-                    }
-                val current = _rag.value
-                if (current is RagUiState.Streaming) {
-                    _rag.value = current.copy(isStreaming = false)
-                }
-            } catch (t: Throwable) {
-                _rag.value = RagUiState.Error(
-                    "Error generando resumen: ${t.localizedMessage ?: "desconocido"}"
-                )
-            } finally {
-                // 3. SIEMPRE descargar el modelo de RAM al terminar.
-                // Esto es lo que evita el OOM en búsquedas posteriores.
-                llmEngine.unload()
-            }
-        }
     }
 
     fun setOcrEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOcrEnabled(enabled) }
-    fun setMaxChunks(n: Int) = viewModelScope.launch { preferences.setMaxChunksForRag(n) }
-
-    /**
-     * Selecciona/deselecciona el modelo. CLAVE: solo guarda la ruta en
-     * preferencias. NO carga el modelo a RAM (eso causaba el OOM al
-     * dejarlo cargado permanentemente). El modelo se carga solo durante
-     * summarizeCurrent() y se descarga al terminar.
-     */
-    fun setModelPath(path: String?) = viewModelScope.launch {
-        // Si había algo cargado, liberarlo
-        llmEngine.unload()
-        preferences.setModelPath(path)
-        _home.update {
-            it.copy(
-                modelConfigured = path != null,
-                modelName = path?.let { p -> java.io.File(p).name }
-            )
-        }
-    }
-
-    fun availableModels() = llmEngine.availableModels(context)
     fun acknowledgeDisclaimer() = viewModelScope.launch { preferences.setDisclaimerAcknowledged(true) }
     fun clearIndex() = viewModelScope.launch { searchRepository.clearAll() }
 

@@ -116,9 +116,6 @@ dependencies {
     // implementation("com.google.mlkit:text-recognition-latin:16.0.1") // Redundant or non-existent version
 
     // MediaPipe LLM Inference (Gemma / Phi / etc.)
-    implementation("com.google.mediapipe:tasks-genai:0.10.18")
-    implementation("com.google.mediapipe:tasks-vision:0.10.18")
-    implementation("com.google.mediapipe:tasks-vision:0.10.18")
 
     // Coil para imágenes (logo, etc.)
     implementation("io.coil-kt:coil-compose:2.7.0")
